@@ -11,6 +11,9 @@ import json
 import argparse
 import time
 import requests
+import hmac
+import hashlib
+import urllib.parse
 from datetime import datetime
 import openai
 
@@ -48,6 +51,38 @@ def generate_ideas(api_key, num_ideas=10, model="gpt-4"):
         raise ValueError(f"Failed to parse JSON from OpenAI response:\n{content}")
     return ideas
 
+# Globals for link generation; set in main()
+RESEARCH_BASE_URL = None
+JWT_SECRET = None
+
+def generate_token(user_id, area):
+    """Generate HMAC token for a user and research area"""
+    msg = f"{user_id}:{area}".encode()
+    return hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()
+
+def format_html(ideas, recipient):
+    """Build HTML email body with deep research links for each idea"""
+    parts = []
+    for item in ideas:
+        area = item.get('area')
+        desc = item.get('description')
+        potential = item.get('potential_savings')
+        target = item.get('target_customer')
+        reason = item.get('reason_untapped')
+        parts.append(f"<h3>{area}</h3>")
+        parts.append("<ul>")
+        parts.append(f"<li><strong>Description:</strong> {desc}</li>")
+        parts.append(f"<li><strong>Potential Savings:</strong> {potential}</li>")
+        parts.append(f"<li><strong>Target Customer:</strong> {target}</li>")
+        parts.append(f"<li><strong>Reason Untapped:</strong> {reason}</li>")
+        parts.append("</ul>")
+        token = generate_token(recipient, area)
+        qs_area = urllib.parse.quote(area)
+        qs_uid = urllib.parse.quote(recipient)
+        link = f"{RESEARCH_BASE_URL}?q={qs_area}&uid={qs_uid}&tk={token}"
+        parts.append(f'<p><a href="{link}">🔎 Deep Research on “{area}”</a></p>')
+    return "\n".join(parts)
+
 def main():
     parser = argparse.ArgumentParser(description="AI Agent Idea Researcher")
     parser.add_argument("--num", "-n", type=int, default=10,
@@ -64,6 +99,10 @@ def main():
                         help="Resend API key (or set RESEND_API_KEY env var)")
     parser.add_argument("--from-email", "-f", default=None,
                         help="Email address to send from (or set RESEND_FROM_EMAIL env var)")
+    parser.add_argument("--research-base-url", "-u", default=None,
+                        help="Base URL for deep research link (or set RESEARCH_BASE_URL env var)")
+    parser.add_argument("--jwt-secret", "-s", default=None,
+                        help="HMAC secret for token generation (or set JWT_SECRET env var)")
     args = parser.parse_args()
 
     api_key = args.apikey or os.getenv("OPENAI_API_KEY")
@@ -77,31 +116,35 @@ def main():
     resend_api_key = args.resend_api_key or os.getenv("RESEND_API_KEY")
     from_email = args.from_email or os.getenv("RESEND_FROM_EMAIL")
 
+    # Deep research link configuration
+    research_base_url = args.research_base_url or os.getenv("RESEARCH_BASE_URL")
+    jwt_secret = args.jwt_secret or os.getenv("JWT_SECRET")
+    if not all([research_base_url, jwt_secret]):
+        print(
+            "Error: --research-base-url and --jwt-secret (or env vars) are required", file=sys.stderr
+        )
+        sys.exit(1)
+    # set globals for link generation
+    global RESEARCH_BASE_URL, JWT_SECRET
+    RESEARCH_BASE_URL = research_base_url
+    JWT_SECRET = jwt_secret
+
     if not all([resend_api_key, from_email]):
         print(
             "Error: Resend API key and sender email required. Provide --resend-api-key and --from-email, "
             "or set RESEND_API_KEY and RESEND_FROM_EMAIL env vars", file=sys.stderr)
         sys.exit(1)
 
-    def format_body(ideas):
-        lines = []
-        for item in ideas:
-            lines.append(f"Area: {item.get('area')}")
-            lines.append(f"Description: {item.get('description')}")
-            lines.append(f"Potential Savings: {item.get('potential_savings')}")
-            lines.append(f"Target Customer: {item.get('target_customer')}")
-            lines.append(f"Reason Untapped: {item.get('reason_untapped')}")
-            lines.append("")
-        return "\n".join(lines)
+    # format_body replaced by HTML formatter with deep research links
 
-    def send_email(subject, body):
+    def send_email(subject, html_content):
         """Send email via Resend API"""
         url = "https://api.resend.com/emails"
         payload = {
             "from": from_email,
             "to": [recipient],
             "subject": subject,
-            "html": f"<pre>{body}</pre>",
+            "html": html_content,
         }
         headers = {
             "Authorization": f"Bearer {resend_api_key}",
@@ -111,13 +154,14 @@ def main():
         resp.raise_for_status()
 
     # Periodically generate ideas and send email
+    # Periodically generate ideas and send email with deep research links
     while True:
         try:
             ideas = generate_ideas(api_key, num_ideas=args.num, model=args.model)
             timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
             subject = f"AI Agent Ideas - {timestamp}"
-            body = format_body(ideas)
-            send_email(subject, body)
+            html_body = format_html(ideas, recipient)
+            send_email(subject, html_body)
             print(f"Email sent to {recipient} at {timestamp}")
         except Exception as e:
             print(f"Error during generation or email send: {e}", file=sys.stderr)
